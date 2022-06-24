@@ -16,6 +16,7 @@ from qtpy.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -24,6 +25,21 @@ if TYPE_CHECKING:
     import napari  # pragma: no cover
 
 logger = logging.getLogger(__name__)
+
+
+# https://stackoverflow.com/questions/28655198/best-way-to-display-logs-in-pyqt
+class QTextEditLogger(logging.Handler):
+    """Send logs to a TextEdit."""
+
+    def __init__(self, parent):
+        super().__init__()
+        # no parent, popup window
+        self.widget = QTextEdit(parent)
+        self.widget.setReadOnly(True)
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.widget.append(msg)
 
 
 class BasicWidget(QWidget):
@@ -64,7 +80,7 @@ class BasicWidget(QWidget):
         tb_doc_reference = QLabel()
         tb_doc_reference.setOpenExternalLinks(True)
         tb_doc_reference.setText(
-            '<a href="https://basicpy-rtd.readthedocs.io/en/latest/">'
+            '<a href="https://basicpy.readthedocs.io/en/latest/#basicpy.BaSiC">'
             "See docs for settings details</a>"
         )
         self.layout().addWidget(tb_doc_reference)
@@ -76,6 +92,14 @@ class BasicWidget(QWidget):
         self.layout().addWidget(advanced_settings)
         self.layout().addWidget(self.run_btn)
         self.layout().addWidget(self.cancel_btn)
+
+        # logger for BaSiC
+        logTextBox = QTextEditLogger(self)
+        # crashes unexpectedly when calling a specific logger
+        # basic_logger = logging.getLogger("basicpy.basicpy")
+        basic_logger = logging.getLogger()
+        basic_logger.addHandler(logTextBox)
+        self.layout().addWidget(logTextBox.widget)
 
     def _build_settings_containers(self):
         advanced = [
@@ -129,18 +153,20 @@ class BasicWidget(QWidget):
         self._extrasettings = dict()
         # settings to display correction profiles
         # options to show flatfield/darkfield profiles
-        self._extrasettings["show_flatfield"] = create_widget(
-            value=True,
-            options={"tooltip": "Output flatfield profile with corrected image"},
-        )
-        self._extrasettings["show_darkfield"] = create_widget(
-            value=True,
-            options={"tooltip": "Output darkfield profile with corrected image"},
-        )
-        self._extrasettings["show_timelapse"] = create_widget(
+        # self._extrasettings["show_flatfield"] = create_widget(
+        #     value=True,
+        #     options={"tooltip": "Output flatfield profile with corrected image"},
+        # )
+        # self._extrasettings["show_darkfield"] = create_widget(
+        #     value=True,
+        #     options={"tooltip": "Output darkfield profile with corrected image"},
+        # )
+        self._extrasettings["timelapse"] = create_widget(
             value=False,
-            options={"tooltip": "Output timelapse correction with corrected image"},
+            options={"tooltip": "Calculate timelapse correction."},
         )
+
+        self._extrasettings["timelapse"].native.setEnabled(False)
 
         simple_settings_container = QGroupBox("Settings")
         simple_settings_container.setLayout(QFormLayout())
@@ -148,7 +174,7 @@ class BasicWidget(QWidget):
             QFormLayout.AllNonFixedFieldsGrow
         )
 
-        # this mess is to put scrollArea INSIDE groupBox
+        # this nested mess is to put scrollArea inside groupBox
         advanced_settings_list = QWidget()
         advanced_settings_list.setLayout(QFormLayout())
         advanced_settings_list.layout().setFieldGrowthPolicy(
@@ -157,7 +183,6 @@ class BasicWidget(QWidget):
 
         for k, v in self._settings.items():
             if k in advanced:
-                # advanced_settings_container.layout().addRow(k, v.native)
                 advanced_settings_list.layout().addRow(k, v.native)
             else:
                 simple_settings_container.layout().addRow(k, v.native)
@@ -169,9 +194,8 @@ class BasicWidget(QWidget):
         advanced_settings_container.setLayout(QVBoxLayout())
         advanced_settings_container.layout().addWidget(advanced_settings_scroll)
 
-        # NOTE uncomment to add "show flatfield, ..." options
-        # for k, v in self._extrasettings.items():
-        #     simple_settings_container.layout().addRow(k, v.native)
+        for k, v in self._extrasettings.items():
+            simple_settings_container.layout().addRow(k, v.native)
 
         return simple_settings_container, advanced_settings_container
 
@@ -189,15 +213,14 @@ class BasicWidget(QWidget):
         data, meta, _ = self.layer_select.value.as_layer_data_tuple()
 
         def update_layer(update):
-            data, flatfield, darkfield, meta = update
+            data, flatfield, darkfield, baseline, meta = update
             self.viewer.add_image(data, **meta)
-            if self._extrasettings["show_flatfield"].value:
-                self.viewer.add_image(flatfield)
-            if (
-                self._extrasettings["show_darkfield"].value
-                and self._settings["get_darkfield"].value
-            ):
+
+            self.viewer.add_image(flatfield)
+            self.viewer.add_image(baseline)
+            if self._settings["get_darkfield"].value:
                 self.viewer.add_image(darkfield)
+            # if self._extrasettings["timelapse"].value:
 
         @thread_worker(
             start_thread=False,
@@ -208,20 +231,27 @@ class BasicWidget(QWidget):
             # TODO log basic output to a QtTextEdit or in a new window
 
             basic = BaSiC(**self.settings)
-            corrected = basic.fit_transform(data)
+            timelapse = self._extrasettings["timelapse"].value
+            corrected = basic.fit_transform(data, timelapse=timelapse)
 
             flatfield = basic.flatfield
             darkfield = basic.darkfield
+            baseline = basic.baseline
 
             # reenable run button
             self.run_btn.setDisabled(False)
 
-            return corrected, flatfield, darkfield, meta
+            return corrected, flatfield, darkfield, baseline, meta
 
         worker = call_basic(data)
+
+        # link cancel button to this process
         self.cancel_btn.clicked.connect(partial(self._cancel, worker=worker))
         worker.finished.connect(self.cancel_btn.clicked.disconnect)
+
+        # start the worker
         worker.start()
+
         return worker
 
     def _cancel(self, worker):
