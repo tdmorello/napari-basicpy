@@ -4,13 +4,15 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+import numpy as np
 from basicpy import BaSiC
 from magicgui.widgets import create_widget
 from napari.qt import thread_worker
 from qtpy.QtCore import QEvent, Qt
-from qtpy.QtGui import QPixmap
+from qtpy.QtGui import QDoubleValidator, QPixmap
 from qtpy.QtWidgets import (
     QCheckBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QLabel,
@@ -80,7 +82,7 @@ class BasicWidget(QWidget):
         tb_doc_reference = QLabel()
         tb_doc_reference.setOpenExternalLinks(True)
         tb_doc_reference.setText(
-            '<a href="https://basicpy.readthedocs.io/en/latest/#basicpy.BaSiC">'
+            '<a href="https://basicpy.readthedocs.io/en/latest/api.html">'
             "See docs for settings details</a>"
         )
         self.layout().addWidget(tb_doc_reference)
@@ -141,14 +143,30 @@ class BasicWidget(QWidget):
             except TypeError:
                 pass
             # name = field.name
-            return create_widget(
-                value=default,
-                annotation=type_,
-                options={"tooltip": description},
-            )
+
+            if (type(default) == float or type(default) == int) and (
+                default < 0.01 or default > 999
+            ):
+                widget = ScientificDoubleSpinBox()
+                widget.native.setValue(default)
+                widget.native.adjustSize()
+            else:
+                widget = create_widget(
+                    value=default,
+                    annotation=type_,
+                    options={"tooltip": description},
+                )
+
+            widget.native.setMinimumWidth(150)
+            return widget
 
         # all settings here will be used to initialize BaSiC
-        self._settings = {k: build_widget(k) for k in BaSiC().settings.keys()}
+        self._settings = {
+            k: build_widget(k)
+            for k in BaSiC().settings.keys()
+            # exclude settings
+            if k not in ["working_size"]
+        }
 
         self._extrasettings = dict()
         # settings to display correction profiles
@@ -161,7 +179,7 @@ class BasicWidget(QWidget):
         #     value=True,
         #     options={"tooltip": "Output darkfield profile with corrected image"},
         # )
-        self._extrasettings["timelapse"] = create_widget(
+        self._extrasettings["get_timelapse"] = create_widget(
             value=False,
             options={"tooltip": "Calculate timelapse correction."},
         )
@@ -214,13 +232,13 @@ class BasicWidget(QWidget):
 
         def update_layer(update):
             data, flatfield, darkfield, baseline, meta = update
+            print(f"corrected shape: {data.shape}")
             self.viewer.add_image(data, **meta)
-
             self.viewer.add_image(flatfield)
-            self.viewer.add_image(baseline)
             if self._settings["get_darkfield"].value:
                 self.viewer.add_image(darkfield)
-            # if self._extrasettings["timelapse"].value:
+            if self._extrasettings["get_timelapse"].value:
+                self.viewer.add_image(baseline)
 
         @thread_worker(
             start_thread=False,
@@ -229,33 +247,42 @@ class BasicWidget(QWidget):
         )
         def call_basic(data):
             # TODO log basic output to a QtTextEdit or in a new window
-
             basic = BaSiC(**self.settings)
-            timelapse = self._extrasettings["timelapse"].value
-            corrected = basic.fit_transform(data, timelapse=timelapse)
+            logger.info(
+                "Calling `basic.fit_transform` with `get_timelapse="
+                f"{self._extrasettings['get_timelapse'].value}`"
+            )
+            corrected = basic.fit_transform(
+                data, timelapse=self._extrasettings["get_timelapse"].value
+            )
 
             flatfield = basic.flatfield
             darkfield = basic.darkfield
             baseline = basic.baseline
 
+            if self._extrasettings["get_timelapse"]:
+                # flatfield = flatfield / basic.baseline
+                ...
+
             # reenable run button
+            # TODO also reenable when error occurs
             self.run_btn.setDisabled(False)
 
             return corrected, flatfield, darkfield, baseline, meta
 
+        # TODO trigger error when BaSiC fails, re-enable "run" button
         worker = call_basic(data)
 
         # link cancel button to this process
         self.cancel_btn.clicked.connect(partial(self._cancel, worker=worker))
         worker.finished.connect(self.cancel_btn.clicked.disconnect)
-
-        # start the worker
+        worker.errored.connect(lambda: self.run_btn.setDisabled(False))
         worker.start()
 
         return worker
 
     def _cancel(self, worker):
-        logger.info("Canceling BasiC")
+        logger.info("Cancel requested")
         worker.quit()
         # enable run button
         worker.finished.connect(lambda: self.run_btn.setDisabled(False))
@@ -299,3 +326,38 @@ class BasicWidget(QWidget):
         header.layout().addWidget(lbl)
 
         return header
+
+
+class QScientificDoubleSpinBox(QDoubleSpinBox):
+    """QDoubleSpinBox with scientific notation."""
+
+    def __init__(self, *args, **kwargs):
+        """Initialize a QDoubleSpinBox for scientific notation input."""
+        super().__init__(*args, **kwargs)
+        self.validator = QDoubleValidator()
+        self.validator.setNotation(QDoubleValidator.ScientificNotation)
+        self.setDecimals(10)
+        self.setMinimum(-np.inf)
+        self.setMaximum(np.inf)
+
+    def validate(self, text, pos):  # noqa: D102
+        return self.validator.validate(text, pos)
+
+    def fixup(self, text):  # noqa: D102
+        return self.validator.fixup(text)
+
+    def textFromValue(self, value):  # noqa: D102
+        return f"{value:.2E}"
+
+
+class ScientificDoubleSpinBox:
+    """Widget for inputing scientific notation."""
+
+    def __init__(self, *args, **kwargs):
+        """Initialize a scientific spinbox widget."""
+        self.native = QScientificDoubleSpinBox(*args, **kwargs)
+
+    @property
+    def value(self):
+        """Return the current value of the widget."""
+        return self.native.value()
