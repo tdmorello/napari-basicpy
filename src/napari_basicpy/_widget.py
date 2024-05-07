@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
+import skimage.io
 import pkg_resources
 from basicpy import BaSiC
 from magicgui.widgets import create_widget
@@ -18,15 +19,17 @@ from napari.qt import thread_worker
 from qtpy.QtCore import QEvent, Qt
 from qtpy.QtGui import QDoubleValidator, QPixmap
 from qtpy.QtWidgets import (
-    QCheckBox,
+    QGridLayout,
+    QFileDialog,
+    QLineEdit,
     QDoubleSpinBox,
     QFormLayout,
-    QGroupBox,
     QLabel,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
+    QTabWidget,
 )
 
 if TYPE_CHECKING:
@@ -47,33 +50,30 @@ class BasicWidget(QWidget):
         super().__init__()
 
         self.viewer = viewer
-        self.setLayout(QVBoxLayout())
+        self.main_layout = QVBoxLayout()
+        self.setLayout(self.main_layout)
 
-        layer_select_layout = QFormLayout()
-        layer_select_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        self.layer_select = create_widget(
-            annotation="napari.layers.Layer", label="layer_select"
-        )
-        layer_select_layout.addRow("layer", self.layer_select.native)
-        layer_select_container = QWidget()
-        layer_select_container.setLayout(layer_select_layout)
+        header = self._build_header()
+        self.main_layout.addWidget(header)
 
+        self.input_tabs = QTabWidget()
+        self.main_layout.addWidget(self.input_tabs)
+
+        self.settings_tabs = QTabWidget()
+        self.main_layout.addWidget(self.settings_tabs)
+
+        # INPUT TABS
+        self._layer_select_container = self._build_layer_select_container()
+        self._folder_select_container = self._build_folder_select_container()
+        self.input_tabs.addTab(self._layer_select_container, "Single Input")
+        self.input_tabs.addTab(self._folder_select_container, "Batch Input")
+
+        # SETTINGS TABS
         simple_settings, advanced_settings = self._build_settings_containers()
-        self.advanced_settings = advanced_settings
+        self.settings_tabs.addTab(simple_settings, "Simple Settings")
+        self.settings_tabs.addTab(advanced_settings, "Advanced Settings")
 
-        self.run_btn = QPushButton("Run")
-        self.run_btn.clicked.connect(self._run)
-        self.cancel_btn = QPushButton("Cancel")
-
-        # header
-        header = self.build_header()
-        self.layout().addWidget(header)
-
-        self.layout().addWidget(layer_select_container)
-        self.layout().addWidget(simple_settings)
-
-        # toggle advanced settings visibility
-        self.toggle_advanced_cb = QCheckBox("Show Advanced Settings")
+        # Link to BaSiCPy docs
         tb_doc_reference = QLabel()
         tb_doc_reference.setOpenExternalLinks(True)
         tb_doc_reference.setText(
@@ -82,13 +82,75 @@ class BasicWidget(QWidget):
         )
         self.layout().addWidget(tb_doc_reference)
 
-        self.layout().addWidget(self.toggle_advanced_cb)
-        self.toggle_advanced_cb.stateChanged.connect(self.toggle_advanced_settings)
+        # Add Run and Cancel buttons
+        self.run_batch_btn = QPushButton("Run Batch")
+        self.run_batch_btn.clicked.connect(self._run_batch)
+        self.run_btn = QPushButton("Run")
+        self.run_btn.clicked.connect(self._run)
+        self.cancel_btn = QPushButton("Cancel")
+        self.main_layout.addWidget(self.run_batch_btn)
+        self.main_layout.addWidget(self.run_btn)
+        self.main_layout.addWidget(self.cancel_btn)
 
-        self.advanced_settings.setVisible(False)
-        self.layout().addWidget(advanced_settings)
-        self.layout().addWidget(self.run_btn)
-        self.layout().addWidget(self.cancel_btn)
+    def _build_header(self):
+        """Build a header."""
+        header = QWidget()
+        header.setLayout(QVBoxLayout())
+
+        # Show/hide logo
+        if SHOW_LOGO:
+            logo_path = Path(__file__).parent / "_icons/logo.png"
+            logo_pm = QPixmap(str(logo_path.absolute()))
+            logo_lbl = QLabel()
+            logo_lbl.setPixmap(logo_pm)
+            logo_lbl.setAlignment(Qt.AlignCenter)
+            header.layout().addWidget(logo_lbl)
+
+        lbl = QLabel(f"<b>BaSiC Shading Correction</b> v{BASICPY_VERSION}")
+        lbl.setAlignment(Qt.AlignCenter)
+
+        header.layout().addWidget(lbl)
+
+        return header
+
+    def _build_layer_select_container(self):
+        layer_select_container = QWidget()
+        layer_select_layout = QFormLayout()
+        layer_select_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.layer_select = create_widget(
+            annotation="napari.layers.Layer", label="layer_select"
+        )
+        layer_select_layout.addRow("layer", self.layer_select.native)
+        layer_select_container.setLayout(layer_select_layout)
+
+        return layer_select_container
+
+    def _build_folder_select_container(self):
+        # container and layout
+        folder_select_container = QWidget()
+        folder_select_layout = QVBoxLayout()
+        folder_select_container.setLayout(folder_select_layout)
+        form_input_output_folder_layout = QGridLayout()
+        folder_select_layout.addLayout(form_input_output_folder_layout)
+        # input folder form
+        self.le_input_folder = QLineEdit()
+        self.btn_select_input_folder = QPushButton("Select Folder")
+        form_input_output_folder_layout.addWidget(QLabel("Input Folder"), 0, 0)
+        form_input_output_folder_layout.addWidget(self.le_input_folder, 0, 1)
+        form_input_output_folder_layout.addWidget(self.btn_select_input_folder, 0, 2)
+        # output folder form
+        self.le_output_folder = QLineEdit()
+        self.btn_select_output_folder = QPushButton("Select Folder")
+        form_input_output_folder_layout.addWidget(QLabel("Output Folder"), 1, 0)
+        form_input_output_folder_layout.addWidget(self.le_output_folder, 1, 1)
+        form_input_output_folder_layout.addWidget(self.btn_select_output_folder, 1, 2)
+
+        self.btn_select_input_folder.clicked.connect(self._on_click_select_input_folder)
+        self.btn_select_output_folder.clicked.connect(
+            self._on_click_select_output_folder
+        )
+
+        return folder_select_container
 
     def _build_settings_containers(self):
         skip = [
@@ -177,28 +239,17 @@ class BasicWidget(QWidget):
         }
 
         self._extrasettings = dict()
-        # settings to display correction profiles
-        # options to show flatfield/darkfield profiles
-        # self._extrasettings["show_flatfield"] = create_widget(
-        #     value=True,
-        #     options={"tooltip": "Output flatfield profile with corrected image"},
-        # )
-        # self._extrasettings["show_darkfield"] = create_widget(
-        #     value=True,
-        #     options={"tooltip": "Output darkfield profile with corrected image"},
-        # )
         self._extrasettings["get_timelapse"] = create_widget(
             value=False,
             options={"tooltip": "Output timelapse correction with corrected image"},
         )
 
-        simple_settings_container = QGroupBox("Settings")
+        simple_settings_container = QWidget()
         simple_settings_container.setLayout(QFormLayout())
         simple_settings_container.layout().setFieldGrowthPolicy(
             QFormLayout.AllNonFixedFieldsGrow
         )
 
-        # this mess is to put scrollArea INSIDE groupBox
         advanced_settings_list = QWidget()
         advanced_settings_list.setLayout(QFormLayout())
         advanced_settings_list.layout().setFieldGrowthPolicy(
@@ -215,7 +266,7 @@ class BasicWidget(QWidget):
         advanced_settings_scroll = QScrollArea()
         advanced_settings_scroll.setWidget(advanced_settings_list)
 
-        advanced_settings_container = QGroupBox("Advanced Settings")
+        advanced_settings_container = QWidget()
         advanced_settings_container.setLayout(QVBoxLayout())
         advanced_settings_container.layout().addWidget(advanced_settings_scroll)
 
@@ -229,8 +280,57 @@ class BasicWidget(QWidget):
         """Get settings for BaSiC."""
         return {k: v.value for k, v in self._settings.items()}
 
+    def _run_batch(self):
+        input_folder = self.le_input_folder.text()
+        output_folder = self.le_output_folder.text()
+
+        # get file list from input_folder
+        input_file_list = list(Path(input_folder).glob("*"))
+        logger.info(f"Found {len(input_file_list)} files")
+
+        # call BaSiC on each input file and save to output folder
+        count = 1
+        total_files = len(input_file_list)
+        for fname in input_file_list:
+            logger.info(f"Processing file {count} of {total_files} ({fname})")
+
+            # check that output files do not already exist
+            output_path = Path(output_folder) / fname.name
+            flatfield_path = output_path.parent / (output_path.stem + "_flatfield.tiff")
+            darkfield_path = output_path.parent / (output_path.stem + "_darkfield.tiff")
+
+            if (
+                output_path.exists()
+                or flatfield_path.exists()
+                or darkfield_path.exists()
+            ):
+                logger.warn(f"Output files already exist for {fname.name}. Skipping...")
+                continue
+
+            try:
+                data = skimage.io.imread(fname)
+            except Exception:
+                logger.warn(f"Scikit-image could not read file {fname}. Skipping...")
+                continue
+
+            basic = BaSiC(**self.settings)
+            corrected = basic.fit_transform(
+                data, timelapse=self._extrasettings["get_timelapse"].value
+            )
+            flatfield = basic.flatfield
+            darkfield = basic.darkfield
+
+            # currently saves as Tiff only
+            # save corrected
+            skimage.io.imsave(output_path, corrected)
+            # save flatfield
+            skimage.io.imsave(flatfield_path, flatfield)
+            # save darkfield
+            skimage.io.imsave(darkfield_path, darkfield)
+
+            count += 1
+
     def _run(self):
-        # TODO visualization (on button?) to represent that program is running
         # disable run button
         self.run_btn.setDisabled(True)
 
@@ -244,8 +344,6 @@ class BasicWidget(QWidget):
             self.viewer.add_image(flatfield)
             if self._settings["get_darkfield"].value:
                 self.viewer.add_image(darkfield)
-            # if self._extrasettings["get_timelapse"].value:
-            #     self.viewer.add_image(baseline)
 
         @thread_worker(
             start_thread=False,
@@ -253,7 +351,6 @@ class BasicWidget(QWidget):
             connect={"returned": update_layer},
         )
         def call_basic(data):
-            # TODO log basic output to a QtTextEdit or in a new window
             basic = BaSiC(**self.settings)
             logger.info(
                 "Calling `basic.fit_transform` with `get_timelapse="
@@ -271,7 +368,6 @@ class BasicWidget(QWidget):
                 ...
 
             # reenable run button
-            # TODO also reenable when error occurs
             self.run_btn.setDisabled(False)
             logger.info(
                 f"BaSiC returned `corrected` {corrected.shape}, "
@@ -280,7 +376,6 @@ class BasicWidget(QWidget):
             )
             return corrected, flatfield, darkfield, meta
 
-        # TODO trigger error when BaSiC fails, re-enable "run" button
         worker = call_basic(data)
         self.cancel_btn.clicked.connect(partial(self._cancel, worker=worker))
         worker.finished.connect(self.cancel_btn.clicked.disconnect)
@@ -297,46 +392,28 @@ class BasicWidget(QWidget):
 
     def showEvent(self, event: QEvent) -> None:  # noqa: D102
         super().showEvent(event)
-        self.reset_choices()
+        self._reset_choices()
 
-    def reset_choices(self, event: Optional[QEvent] = None) -> None:
+    def _reset_choices(self, event: Optional[QEvent] = None) -> None:
         """Repopulate image list."""  # noqa DAR101
         self.layer_select.reset_choices(event)
-        if len(self.layer_select) < 1:
-            self.run_btn.setEnabled(False)
-        else:
-            self.run_btn.setEnabled(True)
+        # if len(self.layer_select) < 1:
+        #     self.run_btn.setEnabled(False)
+        # else:
+        #     self.run_btn.setEnabled(True)
 
-    def toggle_advanced_settings(self) -> None:
-        """Toggle the advanced settings container."""
-        # container = self.advanced_settings
-        container = self.advanced_settings
-        if self.toggle_advanced_cb.isChecked():
-            container.setHidden(False)
-        else:
-            container.setHidden(True)
+    # Button Functions
+    def _on_click_select_input_folder(self):
+        input_folder_selection = str(
+            QFileDialog.getExistingDirectory(self, "Select Input Folder")
+        )
+        self.le_input_folder.setText(input_folder_selection)
 
-    def build_header(self):
-        """Build a header."""
-
-        header = QWidget()
-        header.setLayout(QVBoxLayout())
-
-        # show/hide logo
-        if SHOW_LOGO:
-            logo_path = Path(__file__).parent / "_icons/logo.png"
-            logo_pm = QPixmap(str(logo_path.absolute()))
-            logo_lbl = QLabel()
-            logo_lbl.setPixmap(logo_pm)
-            logo_lbl.setAlignment(Qt.AlignCenter)
-            header.layout().addWidget(logo_lbl)
-
-        lbl = QLabel(f"<b>BaSiC Shading Correction</b> v{BASICPY_VERSION}")
-        lbl.setAlignment(Qt.AlignCenter)
-
-        header.layout().addWidget(lbl)
-
-        return header
+    def _on_click_select_output_folder(self):
+        output_folder_selection = str(
+            QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        )
+        self.le_output_folder.setText(output_folder_selection)
 
 
 class QScientificDoubleSpinBox(QDoubleSpinBox):
